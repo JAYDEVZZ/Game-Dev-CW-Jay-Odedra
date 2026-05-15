@@ -3,50 +3,60 @@ using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.InputSystem;
 using UnityEngine.AI;
-
+using UnityEngine.SceneManagement;
 
 public class Player : MonoBehaviour
 {
-    // --- Components ---
     private PlayerActions _inputActions;
 
     [SerializeField] private AnyStateAnimator animator;
     [SerializeField] private CharacterController characterController;
     [SerializeField] private NavMeshAgent navMeshAgent;
 
-    // --- State + Movement Values ---
     #region Internal State
     private Vector2 _moveDir;
-    private float _lookInput;
-    private bool _isRunning;
-    private bool _isCrouching;
-    private bool _isDead;
-    private float _currentSpeed;
-    private float _vVelocity; // For gravity calculations
+    private bool    _isRunning;
+    private bool    _isCrouching;
+    private bool    _isDead;
+    private float   _currentSpeed;
+    private float   _vVelocity;
     #endregion
 
     #region Tuning Parameters
     [Header("Speed Settings")]
-    [SerializeField] private float walkSpeed = 2.0f;
-    [SerializeField] private float runSpeed = 5.0f;
+    [SerializeField] private float walkSpeed   = 2.0f;
+    [SerializeField] private float runSpeed    = 5.0f;
     [SerializeField] private float crouchSpeed = 1.0f;
-    
     [Header("Physics & Rotation")]
-    [SerializeField] private float rotationSpeed = 80.0f;
-    [SerializeField] private float gravityForce = -9.81f;
-
+    [SerializeField] private float rotationSpeed = 10.0f;
+    [SerializeField] private float gravityForce  = -9.81f;
     [Header("Collision Heights")]
-    [SerializeField] private float standingHeight = 2.0f;
-    [SerializeField] private float crouchingHeight = 1.0f;
+    [SerializeField] private float standingHeight  = 1.27f;
+    [SerializeField] private float crouchingHeight = 0.8f;
+    [Header("Aim Settings")]
+    [SerializeField] private float aimSpeedMultiplier = 0.4f;
+    [SerializeField] private ThirdPersonCamera thirdPersonCamera;
+    [Header("Footstep Sounds")]
+    [SerializeField] private float walkSoundRadius     = 3f;
+    [SerializeField] private float runSoundRadius      = 9f;
+    [SerializeField] private float walkDetectionAmount = 0.04f;
+    [SerializeField] private float runDetectionAmount  = 0.12f;
     #endregion
+
+    private PlayerAudioSystem _audio;
 
     private void Awake()
     {
         _inputActions = new PlayerActions();
         _currentSpeed = walkSpeed;
+        _audio        = GetComponent<PlayerAudioSystem>();
 
-        // Fallback for NavMesh if not assigned manualy
         if (navMeshAgent == null) navMeshAgent = GetComponent<NavMeshAgent>();
+        if (navMeshAgent != null)
+        {
+            navMeshAgent.updatePosition = false;
+            navMeshAgent.updateRotation = false;
+        }
 
         BindInputEvents();
     }
@@ -54,141 +64,162 @@ public class Player : MonoBehaviour
     private void Start()
     {
         SetupAnimations();
+        Cursor.lockState = CursorLockMode.Locked;
+        Cursor.visible   = false;
     }
 
     private void Update()
     {
-        if (!_isDead) 
-        { 
-            HandleLocomotion(); 
-            HandleRotation(); 
+        if (!_isDead)
+        {
+            HandleLocomotion();
+            HandleRotation();
         }
     }
 
-    // --- Input Binding ---
+        public void ReturnToMainMenu()
+    {
+        Cursor.lockState = CursorLockMode.None;
+        Cursor.visible   = true;
+        SceneManager.LoadScene("MainMenu");
+    }
+
+    // ---- called by anination events on walk/run clips ----
+    public void PlayFootstep()
+    {
+        if (_isCrouching) return;
+
+        _audio?.PlayFootstep(_isRunning);
+        float radius = _isRunning ? runSoundRadius  : walkSoundRadius;
+        float amount = _isRunning ? runDetectionAmount : walkDetectionAmount;
+        SoundManager.EmitSound(transform.position, radius, amount);
+    }
+
+    public void OnDeath()
+    {
+        _isDead = true;
+        StartCoroutine(HandleDeath());
+    }
+
+    private IEnumerator HandleDeath()
+    {
+        characterController.enabled = false;
+        if (navMeshAgent != null) navMeshAgent.enabled = false;
+        yield return new WaitForSeconds(2.5f);
+    }
 
     private void BindInputEvents()
     {
-        // Link New input system actions to local variables/methods
         _inputActions.Controls.Move.performed += ctx => _moveDir = ctx.ReadValue<Vector2>();
-        _inputActions.Controls.Move.canceled += ctx => _moveDir = Vector2.zero;
-        
-        _inputActions.Controls.MouseMovement.performed += ctx => _lookInput = ctx.ReadValue<float>();
-        
-        _inputActions.Controls.Run.performed += ctx => ToggleRun();
-        
-        // Dynamic binding for Crouch
+        _inputActions.Controls.Move.canceled  += ctx => _moveDir = Vector2.zero;
+        _inputActions.Controls.Run.performed  += ctx => ToggleRun();
         var crouch = _inputActions.Controls.Get().FindAction("Crouch");
         if (crouch != null) crouch.performed += ctx => ToggleCrouch();
     }
 
-    // --- Core Mechanics ---
-
     private void HandleLocomotion()
     {
-        // Basic Grounded Physics check
-        if (characterController.isGrounded && _vVelocity < 0)
-        {
-            _vVelocity = -2f; // Slight downward force to keep grounded
-        }
-        
-        // Apply Gravity over time
+        bool isGrounded = Physics.SphereCast(
+            transform.position + characterController.center,
+            characterController.radius - 0.01f,
+            Vector3.down, out _,
+            (characterController.height / 2f) + 0.1f);
+
+        if (isGrounded && _vVelocity < 0) _vVelocity = -5f;
+
+
+
         _vVelocity += gravityForce * Time.deltaTime;
 
-        // Convert 2D Input into 3D World Space vectors relative to player rotation
-        Vector3 moveSide = transform.right * _moveDir.x;
-        Vector3 moveForward = transform.forward * _moveDir.y;
+        Vector3 moveSide     = transform.right   * _moveDir.x;
+        Vector3 moveForward  = transform.forward * _moveDir.y;
         Vector3 verticalMove = Vector3.up * _vVelocity;
 
-        // Execute the move through the CharacterController
-        characterController.Move(((moveSide + moveForward) * _currentSpeed + verticalMove) * Time.deltaTime);
+        bool  isAiming       = thirdPersonCamera != null && thirdPersonCamera.IsAiming;
+        float speedThisFrame = _currentSpeed * (isAiming ? aimSpeedMultiplier : 1f);
 
-        // Update Animations based on input magnitude
+        characterController.Move(
+            ((moveSide + moveForward) * speedThisFrame + verticalMove) * Time.deltaTime);
+
+
         if (_moveDir.sqrMagnitude > 0.01f)
-        {
             DetermineMovementAnimation();
-        }
         else
-        {
-            // Play Idle variants
             animator.TryPlayAnimaiton(_isCrouching ? "CrouchIdle" : "Stand");
-        }
     }
 
     private void HandleRotation()
     {
-        // Don't rotate character if holding RMB 
-        if (Mouse.current.rightButton.isPressed) return;
 
-        float yaw = _lookInput * rotationSpeed * Time.deltaTime;
-        transform.Rotate(Vector3.up * yaw);
+        bool isAiming = thirdPersonCamera != null && thirdPersonCamera.IsAiming;
+        if (!isAiming && _moveDir.sqrMagnitude < 0.01f) return;
+
+        float      camYaw         = Camera.main.transform.eulerAngles.y;
+        Quaternion targetRotation = Quaternion.Euler(0, camYaw, 0);
+        transform.rotation = Quaternion.Slerp(
+            transform.rotation, targetRotation, rotationSpeed * Time.deltaTime);
     }
 
     private void ToggleRun()
     {
-        if (_isCrouching) return; // no running while crouched
 
-        _isRunning = !_isRunning;
+        if (_isCrouching) return;
+        _isRunning    = !_isRunning;
         _currentSpeed = _isRunning ? runSpeed : walkSpeed;
     }
 
     private void ToggleCrouch()
     {
-        _isCrouching = !_isCrouching;
-        _isRunning = false; // Stop running when entering crouch
-        
+        _isCrouching  = !_isCrouching;
+        _isRunning    = false;
         _currentSpeed = _isCrouching ? crouchSpeed : walkSpeed;
 
-        // Adjust physical height so that the AI raycasts/physics can pass over the player
-        float h = _isCrouching ? crouchingHeight : standingHeight;
-        characterController.height = h;
-        characterController.center = new Vector3(0, h / 2f, 0);
 
-        // Sync NavMesh Agent height to prevent pathfinding issues while low
+
+        float h     = _isCrouching ? crouchingHeight : standingHeight;
+        float footY = characterController.center.y - characterController.height / 2f;
+        characterController.height = h;
+        characterController.center = new Vector3(0, footY + h / 2f, 0);
+
         if (navMeshAgent != null) navMeshAgent.height = h;
     }
 
     private void DetermineMovementAnimation()
     {
-        // Build the animation string based on current flags
         string prefix = _isCrouching ? "Crouch" : (_isRunning ? "Run" : "Walk");
-        string dir = "Forward";
+        string dir    = "Forward";
 
-        // Simple directional check for basic 4-way movement
-        if (_moveDir.y < -0.1f) dir = "Back";
-        else if (_moveDir.x > 0.1f) dir = "Right";
+
+        if      (_moveDir.y < -0.1f) dir = "Back";
+        else if (_moveDir.x >  0.1f) dir = "Right";
         else if (_moveDir.x < -0.1f) dir = "Left";
 
         animator.TryPlayAnimaiton(prefix + dir);
     }
 
-    // --- Boilerplate & Setup ---
-
     private void SetupAnimations()
     {
-        // Define priority: "Die" overrides everything
         string p = "Die";
-        
-        // Register all possible states with the AnyState system
         animator.AddAnimation(
-            new AnyStateAnimation("Stand", p),
+            new AnyStateAnimation("Stand",         p),
             new AnyStateAnimation("Die"),
-            new AnyStateAnimation("CrouchIdle", p),
-            new AnyStateAnimation("WalkForward", p),
-            new AnyStateAnimation("WalkBack", p),
-            new AnyStateAnimation("WalkLeft", p),
-            new AnyStateAnimation("WalkRight", p),
-            new AnyStateAnimation("RunForward", p),
-            new AnyStateAnimation("RunBack", p),
-            new AnyStateAnimation("RunLeft", p),
-            new AnyStateAnimation("RunRight", p),
+            new AnyStateAnimation("CrouchIdle",    p),
+            new AnyStateAnimation("WalkForward",   p),
+            new AnyStateAnimation("WalkBack",      p),
+            new AnyStateAnimation("WalkLeft",      p),
+            new AnyStateAnimation("WalkRight",     p),
+            new AnyStateAnimation("RunForward",    p),
+            new AnyStateAnimation("RunBack",       p),
+            new AnyStateAnimation("RunLeft",       p),
+            new AnyStateAnimation("RunRight",      p),
             new AnyStateAnimation("CrouchForward", p),
-            new AnyStateAnimation("CrouchBack", p),
-            new AnyStateAnimation("CrouchLeft", p),
-            new AnyStateAnimation("CrouchRight", p)
+            new AnyStateAnimation("CrouchBack",    p),
+            new AnyStateAnimation("CrouchLeft",    p),
+            new AnyStateAnimation("CrouchRight",   p)
         );
     }
 
-    private void OnEnable() => _inputActions.Enable();
+
+    private void OnEnable()  => _inputActions.Enable();
     private void OnDisable() => _inputActions.Disable();
 }

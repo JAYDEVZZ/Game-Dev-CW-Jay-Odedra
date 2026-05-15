@@ -7,6 +7,7 @@ public class AnyStateAnimation
     public string AnimationName { get; set; }
     public bool IsPlaying { get; set; }
     public string[] HigherPrio { get; set; }
+    
 
     public AnyStateAnimation(string animationName, params string[] higherPrio)
     {

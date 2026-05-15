@@ -22,7 +22,6 @@ public class AnyStateAnimator : MonoBehaviour
     {
         if (!anyStateAnimatioins.ContainsKey(animationName)) return;
         
-        // If it's already the active playing animation, don't do anything
         if (anyStateAnimatioins[animationName].IsPlaying) return;
 
         bool startAnimation = true;
@@ -38,6 +37,8 @@ public class AnyStateAnimator : MonoBehaviour
             }
         }
 
+
+
         if (startAnimation)
         {
             StartAnimation(animationName);
@@ -46,14 +47,13 @@ public class AnyStateAnimator : MonoBehaviour
 
     private void StartAnimation(string animationName)
     {
-        // Set EVERY animation to false first
+        // reset all before setting the new one
         foreach (string animName in anyStateAnimatioins.Keys.ToList())
         {
             anyStateAnimatioins[animName].IsPlaying = false;
-            animator.SetBool(animName, false); // Force sync with Animator
+            animator.SetBool(animName, false);
         }
-        
-        // Set the target animation to true
+
         anyStateAnimatioins[animationName].IsPlaying = true;
         animator.SetBool(animationName, true);
     }
@@ -74,6 +74,7 @@ public class AnyStateAnimator : MonoBehaviour
             animator.SetBool(key, anyStateAnimatioins[key].IsPlaying);
         }
     }
+    
 
     public void OnAnimationDone(string animationName)
     {
